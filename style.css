@@ -107,3 +107,16 @@ dl.rows .sumrow{font-weight:700;border-top:1px solid var(--line);padding-top:6px
 @media (max-width:480px){
   .timegrid{grid-template-columns:1fr}
 }
+
+.brk{border:1px solid var(--line);border-radius:10px;padding:12px;margin:0 0 8px}
+.brkgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:end;margin-bottom:8px}
+.brkgrid label{margin:0}
+.brkgrid .lab{display:block;font-size:.875rem;color:var(--sub);margin-bottom:4px}
+.brk .hint{margin:0}
+@media (max-width:480px){.brkgrid{grid-template-columns:1fr}}
+
+.eff{border:1px solid var(--line);border-radius:10px;padding:12px 12px 0;margin-bottom:12px}
+label.check{display:flex;align-items:flex-start;gap:8px;color:var(--text)}
+label.check input{width:20px;height:20px;margin:2px 0 0;min-height:0;flex-shrink:0;accent-color:var(--accent)}
+.hist{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.linkbtn{min-height:28px;padding:0 8px;font-size:.78rem;color:var(--danger)}

@@ -67,20 +67,28 @@
   function cleanWp(w) {
     if (!w || typeof w !== 'object' || typeof w.id !== 'string' || !ID_RE.test(w.id)) return null;
     if (!isNum(w.updatedAt, 0, 1e14)) return null;
-    if (w.deleted === true) return { id: w.id, name: '', wage: 0, rate: 0, updatedAt: w.updatedAt, deleted: true };
+    if (w.deleted === true) return { id: w.id, name: '', wage: 0, rate: 0, hist: [], updatedAt: w.updatedAt, deleted: true };
     const name = typeof w.name === 'string' ? w.name.trim().slice(0, 40) : '';
     if (!name || !isNum(w.wage, 0, 1e6) || !isNum(w.rate, 0, 300)) return null;
-    return { id: w.id, name, wage: w.wage, rate: w.rate, updatedAt: w.updatedAt, deleted: false };
+    const hist = arr(w.hist).slice(0, 100)
+      .map((x) => (x && validDate(x.from) && isNum(x.wage, 0, 1e6) && isNum(x.rate, 0, 300) ? { from: x.from, wage: x.wage, rate: x.rate } : null))
+      .filter(Boolean)
+      .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+    return { id: w.id, name, wage: w.wage, rate: w.rate, hist, updatedAt: w.updatedAt, deleted: false };
   }
 
   function cleanShift(s) {
     if (!s || typeof s !== 'object' || typeof s.id !== 'string' || !ID_RE.test(s.id)) return null;
     if (!isNum(s.updatedAt, 0, 1e14)) return null;
-    if (s.deleted === true) return { id: s.id, wp: '', date: '2000-01-01', sh: 0, sm: 0, eh: 0, em: 0, updatedAt: s.updatedAt, deleted: true };
+    if (s.deleted === true) return { id: s.id, wp: '', date: '2000-01-01', sh: 0, sm: 0, eh: 0, em: 1, br: 0, bh: null, bm: 0, updatedAt: s.updatedAt, deleted: true };
     if (typeof s.wp !== 'string' || !ID_RE.test(s.wp) || !validDate(s.date)) return null;
     if (!isInt(s.sh, 0, 23) || !isInt(s.eh, 0, 23) || !isInt(s.sm, 0, 59) || !isInt(s.em, 0, 59)) return null;
-    if (s.sh * 60 + s.sm === s.eh * 60 + s.em) return null;
-    return { id: s.id, wp: s.wp, date: s.date, sh: s.sh, sm: s.sm, eh: s.eh, em: s.em, updatedAt: s.updatedAt, deleted: false };
+    const br = s.br === undefined ? 0 : s.br;
+    const bh = s.bh === undefined || s.bh === null ? null : s.bh;
+    const bm = bh === null ? 0 : s.bm;
+    if (!isInt(br, 0, 1439) || !(bh === null || isInt(bh, 0, 23)) || !isInt(bm, 0, 59)) return null;
+    if (!calc(1, 0, s.sh, s.sm, s.eh, s.em, br, bh, bm)) return null;
+    return { id: s.id, wp: s.wp, date: s.date, sh: s.sh, sm: s.sm, eh: s.eh, em: s.em, br, bh, bm, updatedAt: s.updatedAt, deleted: false };
   }
 
   function cleanDoc(d) {
@@ -109,20 +117,47 @@
   // ---------- 給与計算 ----------
   function overlap(a0, a1, b0, b1) { return Math.max(0, Math.min(a1, b1) - Math.max(a0, b0)); }
 
-  function calc(wage, rate, sh, sm, eh, em) {
+  // 指定日に有効な時給・割増率（履歴の「この日から」を適用。履歴より前は初期値）
+  function termsAt(w, date) {
+    let t = w;
+    for (const x of w.hist) if (x.from <= date) t = x;
+    return { wage: t.wage, rate: t.rate };
+  }
+  function todayStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+  function calcShift(w, s) {
+    const t = termsAt(w, s.date);
+    return calc(t.wage, t.rate, s.sh, s.sm, s.eh, s.em, s.br, s.bh, s.bm);
+  }
+
+  // 開始＝終了は24時間勤務。休憩は分数＋任意の開始時刻（未指定なら勤務全体に按分）
+  function calc(wage, rate, sh, sm, eh, em, br = 0, bh = null, bm = 0) {
     const s = sh * 60 + sm;
     let e = eh * 60 + em;
-    if (e === s) return null;
-    let cross = false;
-    if (e < s) { e += 1440; cross = true; }
+    const cross = e <= s;
+    if (cross) e += 1440;
     const total = e - s;
-    let night = 0;
-    for (let k = 0; k < 3; k++) {
-      for (const [a, b] of NIGHT_WINDOWS) night += overlap(s, e, k * 1440 + a, k * 1440 + b);
+    if (br >= total) return null;
+    const nightIn = (a, b) => {
+      let n = 0;
+      for (let k = 0; k < 3; k++) for (const [x, y] of NIGHT_WINDOWS) n += overlap(a, b, k * 1440 + x, k * 1440 + y);
+      return n;
+    };
+    let night = nightIn(s, e);
+    if (br > 0) {
+      if (bh === null) night = Math.round((night * (total - br)) / total);
+      else {
+        const off = ((bh * 60 + bm - s) % 1440 + 1440) % 1440;
+        if (off + br > total) return null;
+        night -= nightIn(s + off, s + off + br);
+      }
     }
-    const base = Math.round((wage * total) / 60);
+    const work = total - br;
+    const base = Math.round((wage * work) / 60);
     const prem = Math.round((wage * (rate / 100) * night) / 60);
-    return { total, night, cross, base, prem, pay: base + prem };
+    return { total, work, br, night, cross, base, prem, pay: base + prem };
   }
 
   // ---------- 状態 ----------
@@ -202,7 +237,16 @@
       }
       sel.value = cur;
     }
-    for (const id of ['fSM', 'fEM']) {
+    {
+      const sel = $('fBH');
+      const cur = sel.value;
+      sel.replaceChildren(h('option', { value: '' }, '指定なし'));
+      for (let i = 0; i < 24; i++) {
+        sel.append(h('option', { value: String(i) }, settings.h24 ? pad(i) : `${i < 12 ? '午前' : '午後'}${i % 12 || 12}`));
+      }
+      sel.value = cur;
+    }
+    for (const id of ['fSM', 'fEM', 'fBM']) {
       const sel = $(id);
       if (sel.options.length) continue;
       for (let i = 0; i < 60; i++) sel.append(h('option', { value: String(i) }, pad(i)));
@@ -215,16 +259,27 @@
     date: $('fDate').value,
     sh: Number($('fSH').value), sm: Number($('fSM').value),
     eh: Number($('fEH').value), em: Number($('fEM').value),
+    br: Math.max(0, Math.floor(Number($('fBR').value) || 0)),
+    bh: $('fBH').value === '' ? null : Number($('fBH').value),
+    bm: $('fBH').value === '' ? 0 : Number($('fBM').value),
   });
+  const calcForm = (w, f) => calcShift(w, f);
+  function formError(f) {
+    const g = calc(1, 0, f.sh, f.sm, f.eh, f.em);
+    if (f.br > 1439 || f.br >= g.total) return '休憩が勤務時間以上になっています。';
+    return '休憩の開始時刻が勤務時間の範囲外です（終了までに収まるようにしてください）。';
+  }
 
   function renderPreview() {
     const f = readForm();
     const w = wpById(f.wp);
     const p = $('fPrev');
     if (!w) { p.textContent = ''; return; }
-    const r = calc(w.wage, w.rate, f.sh, f.sm, f.eh, f.em);
-    if (!r) { p.textContent = '開始と終了が同じ時刻です。'; return; }
-    p.textContent = `実働 ${fmtDur(r.total)}（うち深夜 ${fmtDur(r.night)}）／ ${yen.format(r.pay)}${r.cross ? '／翌日終了' : ''}`;
+    $('fBM').disabled = f.bh === null;
+    const r = calcForm(w, f);
+    if (!r) { p.textContent = formError(f); return; }
+    const same = f.sh * 60 + f.sm === f.eh * 60 + f.em;
+    p.textContent = `実働 ${fmtDur(r.work)}${r.br ? `（休憩 ${fmtDur(r.br)}控除）` : ''}／深夜 ${fmtDur(r.night)}／ ${yen.format(r.pay)}${same ? '／24時間勤務' : r.cross ? '／翌日終了' : ''}`;
   }
 
   // ---------- 描画 ----------
@@ -252,7 +307,7 @@
     if (list.some((w) => w.id === cur)) sel.value = cur;
     const none = list.length === 0;
     $('noWpHint').hidden = !none;
-    for (const id of ['fWp', 'fDate', 'fSH', 'fSM', 'fEH', 'fEM', 'fSave']) $(id).disabled = none;
+    for (const id of ['fWp', 'fDate', 'fSH', 'fSM', 'fEH', 'fEM', 'fBR', 'fBH', 'fSave']) $(id).disabled = none;
   }
 
   function renderShifts() {
@@ -263,12 +318,12 @@
     if (!rows.length) { ul.replaceChildren(h('li', { class: 'empty' }, 'この月の記録はありません')); return; }
     ul.replaceChildren(...rows.map((s) => {
       const w = wpById(s.wp);
-      const r = calc(w.wage, w.rate, s.sh, s.sm, s.eh, s.em);
+      const r = calcShift(w, s);
       return h('li', { class: 'item' },
         h('div', { class: 'main' },
           h('div', { class: 't1' }, `${fmtDate(s.date)}　${w.name}`),
           h('div', { class: 't2' }, `${fmtTime(s.sh, s.sm)} → ${r.cross ? '翌 ' : ''}${fmtTime(s.eh, s.em)}`),
-          h('div', { class: 't3' }, `${fmtDur(r.total)}`, r.night ? h('span', { class: 'night' }, `（深夜 ${fmtDur(r.night)}）`) : null)),
+          h('div', { class: 't3' }, `実働 ${fmtDur(r.work)}`, r.br ? `（休憩 ${fmtDur(r.br)}）` : null, r.night ? h('span', { class: 'night' }, `（深夜 ${fmtDur(r.night)}）`) : null)),
         h('div', { class: 'side' },
           h('div', { class: 'pay' }, yen.format(r.pay)),
           h('div', { class: 'acts' },
@@ -281,10 +336,14 @@
     const ul = $('wpList');
     const list = activeWps();
     if (!list.length) { ul.replaceChildren(h('li', { class: 'empty' }, '職場がまだありません')); return; }
+    const today = todayStr();
     ul.replaceChildren(...list.map((w) => h('li', { class: 'item' },
       h('div', { class: 'main' },
         h('div', { class: 't1' }, w.name),
-        h('div', { class: 't2' }, `時給 ${yen.format(w.wage)}／深夜割増 ${w.rate}%`)),
+        h('div', { class: 't2' }, (({ wage, rate }) => `時給 ${yen.format(wage)}／深夜割増 ${rate}%`)(termsAt(w, today))),
+        ...w.hist.map((x) => h('div', { class: 't3 hist' },
+          `${x.from} から: 時給 ${yen.format(x.wage)}／割増 ${x.rate}% `,
+          h('button', { type: 'button', class: 'small linkbtn', 'aria-label': `${x.from}からの変更を削除`, onclick: () => deleteHist(w.id, x.from) }, '削除')))),
       h('div', { class: 'acts' },
         h('button', { type: 'button', class: 'small', onclick: () => startEditWp(w.id) }, '編集'),
         h('button', { type: 'button', class: 'small danger', onclick: () => deleteWp(w.id) }, '削除')))));
@@ -297,9 +356,9 @@
       if (s.date.slice(0, 7) !== settings.month) continue;
       const w = wpById(s.wp);
       if (!w) continue;
-      const r = calc(w.wage, w.rate, s.sh, s.sm, s.eh, s.em);
-      const a = per.get(w.id) || { w, n: 0, total: 0, night: 0, base: 0, prem: 0, pay: 0 };
-      a.n++; a.total += r.total; a.night += r.night; a.base += r.base; a.prem += r.prem; a.pay += r.pay;
+      const r = calcShift(w, s);
+      const a = per.get(w.id) || { w, n: 0, total: 0, br: 0, night: 0, base: 0, prem: 0, pay: 0 };
+      a.n++; a.total += r.work; a.br += r.br; a.night += r.night; a.base += r.base; a.prem += r.prem; a.pay += r.pay;
       per.set(w.id, a);
     }
     const items = [...per.values()].sort((a, b) => b.pay - a.pay);
@@ -316,7 +375,8 @@
         h('h3', {}, a.w.name),
         h('dl', { class: 'rows' },
           h('dt', {}, '勤務回数'), h('dd', {}, `${a.n}回`),
-          h('dt', {}, '労働時間'), h('dd', {}, fmtDur(a.total)),
+          h('dt', {}, '労働時間（休憩除く）'), h('dd', {}, fmtDur(a.total)),
+          a.br ? h('dt', {}, '休憩（控除済み）') : null, a.br ? h('dd', {}, fmtDur(a.br)) : null,
           h('dt', {}, 'うち深夜（22〜5時）'), h('dd', {}, fmtDur(a.night)),
           h('dt', {}, '基本給'), h('dd', {}, yen.format(a.base)),
           h('dt', {}, '深夜割増'), h('dd', {}, yen.format(a.prem)),
@@ -343,6 +403,8 @@
     $('fWp').value = s.wp; $('fDate').value = s.date;
     $('fSH').value = String(s.sh); $('fSM').value = String(s.sm);
     $('fEH').value = String(s.eh); $('fEM').value = String(s.em);
+    $('fBR').value = String(s.br);
+    $('fBH').value = s.bh === null ? '' : String(s.bh); $('fBM').value = String(s.bm);
     $('shiftTitle').textContent = '勤務を編集';
     $('fSave').textContent = '更新する';
     $('fCancel').hidden = false;
@@ -363,7 +425,8 @@
     msg.textContent = '';
     if (!wpById(f.wp)) { msg.textContent = '職場を選んでください。'; return; }
     if (!validDate(f.date)) { msg.textContent = '日付を入力してください。'; return; }
-    if (f.sh * 60 + f.sm === f.eh * 60 + f.em) { msg.textContent = '開始と終了が同じ時刻です。'; return; }
+    if ($('fBR').value !== '' && !(Number($('fBR').value) >= 0)) { msg.textContent = '休憩は0以上の分数で入力してください。'; return; }
+    if (!calcForm(wpById(f.wp), f)) { msg.textContent = formError(f); return; }
     const rec = { id: editShift || uid(), ...f, updatedAt: Date.now(), deleted: false };
     if (editShift) db.shifts = db.shifts.map((x) => (x.id === editShift ? rec : x));
     else db.shifts.push(rec);
@@ -381,13 +444,17 @@
     $('wCancel').hidden = true;
     $('wpForm').reset();
     $('wRate').value = '25';
+    $('wAll').checked = false;
+    $('wEffBox').hidden = true;
     $('wMsg').textContent = '';
   }
   function startEditWp(id) {
     const w = wpById(id);
     if (!w) return;
     editWp = id;
-    $('wName').value = w.name; $('wWage').value = String(w.wage); $('wRate').value = String(w.rate);
+    const t = termsAt(w, '9999-12-31');
+    $('wName').value = w.name; $('wWage').value = String(t.wage); $('wRate').value = String(t.rate);
+    $('wFrom').value = todayStr(); $('wAll').checked = false; $('wEffBox').hidden = false;
     $('wpTitle').textContent = '職場を編集';
     $('wSave').textContent = '更新する';
     $('wCancel').hidden = false;
@@ -404,6 +471,13 @@
     if (editWp === id) resetWpForm();
     commit();
   }
+  function deleteHist(id, from) {
+    const w = wpById(id);
+    if (!w || !confirm(`${from} からの時給・割増率の変更を削除しますか？`)) return;
+    w.hist = w.hist.filter((x) => x.from !== from);
+    w.updatedAt = Date.now();
+    commit();
+  }
   function submitWp(ev) {
     ev.preventDefault();
     const name = $('wName').value.trim().slice(0, 40);
@@ -414,8 +488,27 @@
     if (!name) { msg.textContent = '職場名を入力してください。'; return; }
     if ($('wWage').value === '' || !isNum(wage, 0, 1e6)) { msg.textContent = '時給は 0〜1,000,000 の数値で入力してください。'; return; }
     if ($('wRate').value === '' || !isNum(rate, 0, 300)) { msg.textContent = '深夜割増率は 0〜300 の数値で入力してください。'; return; }
-    const rec = { id: editWp || uid(), name, wage, rate, updatedAt: Date.now(), deleted: false };
-    if (editWp) db.workplaces = db.workplaces.map((x) => (x.id === editWp ? rec : x));
+    const cur = editWp ? wpById(editWp) : null;
+    let rec;
+    if (!cur) rec = { id: uid(), name, wage, rate, hist: [], updatedAt: Date.now(), deleted: false };
+    else {
+      const latest = termsAt(cur, '9999-12-31');
+      let base = { wage: cur.wage, rate: cur.rate };
+      let hist = cur.hist.slice();
+      if (wage !== latest.wage || rate !== latest.rate) {
+        if ($('wAll').checked) { base = { wage, rate }; hist = []; }
+        else {
+          const from = $('wFrom').value;
+          if (!validDate(from)) { msg.textContent = '「この日から適用」の日付を入力してください。'; return; }
+          hist = hist.filter((x) => x.from !== from);
+          if (hist.length >= 100) { msg.textContent = '変更履歴が多すぎます。古い履歴を削除してください。'; return; }
+          hist.push({ from, wage, rate });
+          hist.sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+        }
+      }
+      rec = { ...cur, name, wage: base.wage, rate: base.rate, hist, updatedAt: Date.now() };
+    }
+    if (cur) db.workplaces = db.workplaces.map((x) => (x.id === rec.id ? rec : x));
     else db.workplaces.push(rec);
     resetWpForm();
     commit();
@@ -672,7 +765,8 @@
     $('nextM').addEventListener('click', () => shiftMonth(1));
 
     $('shiftForm').addEventListener('submit', submitShift);
-    for (const id of ['fWp', 'fSH', 'fSM', 'fEH', 'fEM']) $(id).addEventListener('change', renderPreview);
+    for (const id of ['fWp', 'fSH', 'fSM', 'fEH', 'fEM', 'fBH', 'fBM']) $(id).addEventListener('change', renderPreview);
+    $('fBR').addEventListener('input', renderPreview);
     $('fCancel').addEventListener('click', () => { resetShiftForm(); renderPreview(); });
     $('wpForm').addEventListener('submit', submitWp);
     $('wCancel').addEventListener('click', resetWpForm);
