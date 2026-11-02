@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' https://accounts.google.com/gsi/style; img-src 'self' data:; connect-src https://www.googleapis.com; frame-src https://accounts.google.com; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>給料計算</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>給料計算</h1>
+  <div class="tools">
+    <label class="switch"><input type="checkbox" id="h24"><span>24時間表記</span></label>
+    <button id="themeBtn" type="button" class="ghost" aria-label="テーマ切替"></button>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="メニュー">
+  <button type="button" data-tab="log" aria-selected="true">記録</button>
+  <button type="button" data-tab="wp" aria-selected="false">職場</button>
+  <button type="button" data-tab="sum" aria-selected="false">集計</button>
+  <button type="button" data-tab="sync" aria-selected="false">同期・設定</button>
+</nav>
+
+<main>
+  <div class="monthbar" id="monthBar">
+    <button type="button" id="prevM" class="ghost" aria-label="前の月">‹</button>
+    <strong id="monthLabel"></strong>
+    <button type="button" id="nextM" class="ghost" aria-label="次の月">›</button>
+  </div>
+
+  <!-- 記録 -->
+  <section id="tab-log">
+    <form id="shiftForm" class="card" novalidate>
+      <h2 id="shiftTitle">勤務を記録</h2>
+      <p class="hint" id="noWpHint" hidden>先に「職場」タブで職場を登録してください。</p>
+      <label>職場<select id="fWp"></select></label>
+      <label>日付（勤務開始日）<input type="date" id="fDate" required></label>
+      <div class="timegrid">
+        <fieldset>
+          <legend>開始</legend>
+          <div class="time"><select id="fSH" aria-label="開始の時"></select><span>:</span><select id="fSM" aria-label="開始の分"></select></div>
+        </fieldset>
+        <fieldset>
+          <legend>終了</legend>
+          <div class="time"><select id="fEH" aria-label="終了の時"></select><span>:</span><select id="fEM" aria-label="終了の分"></select></div>
+        </fieldset>
+      </div>
+      <fieldset class="brk">
+        <legend>休憩（任意）</legend>
+        <div class="brkgrid">
+          <label>休憩時間（分）<input type="number" id="fBR" inputmode="numeric" min="0" max="1439" step="1" value="0"></label>
+          <div>
+            <span class="lab">休憩の開始時刻</span>
+            <div class="time"><select id="fBH" aria-label="休憩開始の時"></select><span>:</span><select id="fBM" aria-label="休憩開始の分"></select></div>
+          </div>
+        </div>
+        <p class="hint">開始時刻を指定すると深夜帯の控除が正確になります。「指定なし」の場合は勤務全体に均等に按分して深夜時間を減らします。開始＝終了の場合は24時間勤務として計算します。</p>
+      </fieldset>
+      <p class="preview" id="fPrev" aria-live="polite"></p>
+      <p class="msg" id="fMsg" role="alert"></p>
+      <div class="btns">
+        <button type="submit" class="primary" id="fSave">記録する</button>
+        <button type="button" id="fCancel" hidden>キャンセル</button>
+      </div>
+    </form>
+    <h2 class="sec">この月の勤務</h2>
+    <ul class="list" id="shiftList"></ul>
+  </section>
+
+  <!-- 職場 -->
+  <section id="tab-wp" hidden>
+    <form id="wpForm" class="card" novalidate>
+      <h2 id="wpTitle">職場を登録</h2>
+      <label>職場名<input type="text" id="wName" maxlength="40" autocomplete="off" required></label>
+      <label>時給（円）<input type="number" id="wWage" inputmode="numeric" min="0" max="1000000" step="1" required></label>
+      <label>深夜割増率（%）<input type="number" id="wRate" inputmode="decimal" min="0" max="300" step="any" value="25" required></label>
+      <div id="wEffBox" class="eff" hidden>
+        <label>変更の適用開始日（この日以降の勤務に適用）<input type="date" id="wFrom"></label>
+        <label class="check"><input type="checkbox" id="wAll"><span>過去の記録も含めて全期間に適用する（誤入力の修正用）</span></label>
+      </div>
+      <p class="hint">深夜 22:00〜翌5:00 の時間に、時給 × 割増率が上乗せされます。編集で時給・割増率を変えると、指定した日以降の勤務にだけ新しい金額が適用され、それ以前の記録は変わりません（勤務開始日で判定）。</p>
+      <p class="msg" id="wMsg" role="alert"></p>
+      <div class="btns">
+        <button type="submit" class="primary" id="wSave">登録する</button>
+        <button type="button" id="wCancel" hidden>キャンセル</button>
+      </div>
+    </form>
+    <h2 class="sec">登録済みの職場</h2>
+    <ul class="list" id="wpList"></ul>
+  </section>
+
+  <!-- 集計 -->
+  <section id="tab-sum" hidden>
+    <div id="sumBody"></div>
+  </section>
+
+  <!-- 同期・設定 -->
+  <section id="tab-sync" hidden>
+    <div class="card">
+      <h2>Googleドライブで同期</h2>
+      <p class="hint">同じ Google アカウントでログインした端末（スマホ・PC）どうしでデータを共有します。データは Drive 内のこのアプリ専用の非表示領域にだけ保存され、Drive 内の他のファイルには一切アクセスしません。</p>
+      <label>OAuth クライアントID<input type="text" id="clientId" autocomplete="off" spellcheck="false" placeholder="xxxx.apps.googleusercontent.com"></label>
+      <label>暗号化パスフレーズ（任意・推奨）<input type="password" id="pass" autocomplete="off" placeholder="設定するとデータを端末側で暗号化します"></label>
+      <p class="hint">パスフレーズはどこにも保存されません（この画面を閉じると消えます）。忘れると暗号化データは復元できません。他の端末でも同じものを入力してください。</p>
+      <p class="status" id="syncStatus" role="status" aria-live="polite"></p>
+      <div class="btns">
+        <button type="button" class="primary" id="driveBtn">Googleドライブと同期</button>
+        <button type="button" id="driveOff">連携を解除</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>バックアップ</h2>
+      <p class="hint">ファイルに書き出して保存できます。パスフレーズを入力していると暗号化されます。読み込みは既存データに統合され、上書きはされません。</p>
+      <div class="btns">
+        <button type="button" id="exportBtn">書き出す</button>
+        <label class="filebtn">読み込む<input type="file" id="importFile" accept=".json,application/json"></label>
+      </div>
+      <p class="msg" id="bMsg" role="alert"></p>
+    </div>
+
+    <div class="card">
+      <h2>この端末のデータ</h2>
+      <p class="hint">共用のパソコンでは、使い終わったら「連携を解除」してからデータを削除してください。Drive 上のデータは削除されません。</p>
+      <div class="btns"><button type="button" class="danger" id="wipeBtn">この端末のデータを削除</button></div>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
